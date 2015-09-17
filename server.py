@@ -26,6 +26,8 @@ padding:10px;
 <body><form action="/f" method="post"><input type="submit" value="Forward"/></form><form action="/b" method="post"><input type="submit" value="Backward"/></form></body></html>
 '''
 
+RAD_TO_DEG = 57.295779513082320876798154814105
+
 class MainHandler(tornado.web.RequestHandler):
     def get(self):
         self.write(form)
@@ -91,8 +93,8 @@ def encoder_init():
     global EncoderPinA1,EncoderPinA2
     GPIO.add_event_detect(EncoderPinA1,GPIO.RISING)
     GPIO.add_event_callback(EncoderPinA1,encodeEventHandler)
-    #GPIO.add_event_detect(EncoderPinA2,GPIO.RISING)
-    #GPIO.add_event_callback(EncoderPinA2,encodeEventHandler)
+    GPIO.add_event_detect(EncoderPinA2,GPIO.RISING)
+    GPIO.add_event_callback(EncoderPinA2,encodeEventHandler)
 
 def encodeEventHandler(pin):
     global left_encoder_count
@@ -141,6 +143,7 @@ def get_x_rotation(x,y,z):
     radians = math.atan2(y, dist(x,z))
     return math.degrees(radians)
 
+'''
 def get_pitch():
     gyro_xout = read_word_2c(0x43)
     gyro_yout = read_word_2c(0x45)
@@ -187,15 +190,15 @@ def imu_test():
 
     print "x rotation: " , get_x_rotation(accel_xout_scaled, accel_yout_scaled, accel_zout_scaled)
     print "y rotation: " , get_y_rotation(accel_xout_scaled, accel_yout_scaled, accel_zout_scaled)
-
+'''
 
 def balance(bus):
     global loop_start_time
     loop_start_time = time.time()
     MPU6050.loop(bus,duration=999999.0,callback=adjust_wheels)
 
-
 def adjust_wheels(loop_counter,rotation_x,rotation_y):
+    global bus
     global last_wheel_position
     global stopped
     global pitch
@@ -203,6 +206,7 @@ def adjust_wheels(loop_counter,rotation_x,rotation_y):
     global wheel_velocity
 
     pitch = rotation_y + 90.0
+
     print 'pitch %f,%f' % (pitch,rotation_y)
 
     if pitch < 60 or pitch > 120:
@@ -216,6 +220,7 @@ def adjust_wheels(loop_counter,rotation_x,rotation_y):
             last_wheel_position = wheel_position
             if abs(wheel_velocity) <= 20 and not stopped:
                 target_position = wheel_position
+                print "New target position: " + repr(wheel_position)
                 stopped = True
 
 def PID(rest_angle,offset):
@@ -228,8 +233,6 @@ def PID(rest_angle,offset):
     global zone_a,zone_b,position_scale_a,position_scale_b,position_scale_c
     global velocity_scale_move,velocity_scale_stop
     global wheel_velocity
-
-    steer_stop = False
 
     if steer_forward:
         offset = offset + wheel_velocity/velocity_scale_move
@@ -287,41 +290,6 @@ def PID(rest_angle,offset):
     else:
         move('right', 'backward', PIDRight * -1)
 
-def move(motor,direction,speed):
-    if speed < 0:
-        speed = 0
-    if speed > 100:
-        speed = 100    
-    if motor == 'left':
-        p1.start(speed)
-        if direction == 'forward':
-            GPIO.output(InAPin1,GPIO.HIGH)
-            GPIO.output(InBPin1,GPIO.LOW)
-        elif direction == 'backward':
-            GPIO.output(InAPin1,GPIO.LOW)
-            GPIO.output(InBPin1,GPIO.HIGH)
-    elif motor == 'right':
-        p2.start(speed)
-        if direction == 'forward':
-            GPIO.output(InBPin2,GPIO.HIGH)
-            GPIO.output(InAPin2,GPIO.LOW)
-        elif direction == 'backward':
-            GPIO.output(InBPin2,GPIO.LOW)
-            GPIO.output(InAPin2,GPIO.HIGH)
-    elif motor == 'both':
-        p1.start(speed)
-        p2.start(speed)
-        if direction == 'forward':
-            GPIO.output(InAPin1,GPIO.HIGH)
-            GPIO.output(InBPin1,GPIO.LOW)
-            GPIO.output(InBPin2,GPIO.HIGH)
-            GPIO.output(InAPin2,GPIO.LOW)
-        elif direction == 'backward':
-            GPIO.output(InAPin1,GPIO.LOW)
-            GPIO.output(InBPin1,GPIO.HIGH)
-            GPIO.output(InBPin2,GPIO.LOW)
-            GPIO.output(InAPin2,GPIO.HIGH)
-            
 
 def stop_and_reset():
     global target_position
@@ -330,26 +298,11 @@ def stop_and_reset():
     i_term = 0
     target_position = wheel_position
 
-def stop(motor):
-    if motor == 'left':
-        p1.stop()
-        GPIO.output(InAPin1,GPIO.LOW)
-        GPIO.output(InBPin1,GPIO.LOW)
-    elif motor == 'right':
-        p2.stop()
-        GPIO.output(InAPin2,GPIO.LOW)
-        GPIO.output(InBPin2,GPIO.LOW)
-    elif motor == 'both':
-        p1.stop()
-        GPIO.output(InAPin1,GPIO.LOW)
-        GPIO.output(InBPin1,GPIO.LOW)
-        p2.stop()
-        GPIO.output(InAPin2,GPIO.LOW)
-        GPIO.output(InBPin2,GPIO.LOW)
-
 
 
 def kalman(newAngle, newRate, dtime):
+    global angle, Q_angle, Q_gyro, R_angle, bias, P_00, P_01, P_10, P_11
+
     # KasBot V2  -  Kalman filter module
     # http://www.arduino.cc/cgi-bin/yabb2/YaBB.pl?num=1284738418
     # http://www.x-firm.com/?page_id=145
@@ -386,22 +339,150 @@ def kalman(newAngle, newRate, dtime):
     
     return angle
 
+# degrees per second from gyro
+def get_gyro_y_rate(bus):
+    (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = MPU6050.read_all(bus)
+    gyro_rate = -1 * (gyro_scaled_y - zero_values['gyro_y'])
+    return gyro_rate
+
+# Y angle/pitch from accelerometer (90 degrees is up)
+def get_acc_y(bus):
+    (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = MPU6050.read_all(bus)
+    
+    return (accel_scaled_x - zero_values['acc_y']) * 90 + 90
+
+    acc_x_val = accel_scaled_x - zero_values['acc_x']
+    acc_y_val = accel_scaled_y - zero_values['acc_y']
+    #acc_y_val = acc_y_val - 1
+    acc_z_val = accel_scaled_z - zero_values['acc_z']
+    
+    #print "\t%s,%s,%s" % (acc_x_val,acc_y_val,acc_z_val)
+
+    R = math.sqrt(math.pow(acc_x_val,2) + math.pow(acc_y_val,2) + math.pow(acc_z_val,2))
+    angle_y = math.acos(acc_y_val / R) * RAD_TO_DEG
+
+    return angle_y
+
+def calibrate_sensors(bus):
+    global zero_values
+    sample_count = 100
+    gyro_y = 0
+    acc_x = 0
+    acc_y = 0
+    acc_z = 0
+    for i in xrange(sample_count):
+        (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = MPU6050.read_all(bus)
+        gyro_y = gyro_y + gyro_scaled_y
+        acc_x = acc_x + accel_scaled_x
+        acc_y = acc_y + accel_scaled_y
+        acc_z = acc_z + accel_scaled_z
+        sleep(0.01)
+    zero_values['gyro_y'] = gyro_y / sample_count
+    zero_values['acc_x'] = acc_x / sample_count
+    zero_values['acc_y'] = acc_y / sample_count
+    zero_values['acc_z'] = acc_z / sample_count
+
+def move(motor,direction,speed):
+    if speed < 0:
+        speed = 0
+    if speed > 100:
+        speed = 100    
+    if motor == 'left':
+        p1.start(speed)
+        if direction == 'forward':
+            GPIO.output(InAPin1,GPIO.HIGH)
+            GPIO.output(InBPin1,GPIO.LOW)
+        elif direction == 'backward':
+            GPIO.output(InAPin1,GPIO.LOW)
+            GPIO.output(InBPin1,GPIO.HIGH)
+    elif motor == 'right':
+        p2.start(speed)
+        if direction == 'forward':
+            GPIO.output(InBPin2,GPIO.HIGH)
+            GPIO.output(InAPin2,GPIO.LOW)
+        elif direction == 'backward':
+            GPIO.output(InBPin2,GPIO.LOW)
+            GPIO.output(InAPin2,GPIO.HIGH)
+    elif motor == 'both':
+        p1.start(speed)
+        p2.start(speed)
+        if direction == 'forward':
+            GPIO.output(InAPin1,GPIO.HIGH)
+            GPIO.output(InBPin1,GPIO.LOW)
+            GPIO.output(InBPin2,GPIO.HIGH)
+            GPIO.output(InAPin2,GPIO.LOW)
+        elif direction == 'backward':
+            GPIO.output(InAPin1,GPIO.LOW)
+            GPIO.output(InBPin1,GPIO.HIGH)
+            GPIO.output(InBPin2,GPIO.LOW)
+            GPIO.output(InAPin2,GPIO.HIGH)           
+
+
+def stop(motor):
+    if motor == 'left':
+        p1.stop()
+        GPIO.output(InAPin1,GPIO.LOW)
+        GPIO.output(InBPin1,GPIO.LOW)
+    elif motor == 'right':
+        p2.stop()
+        GPIO.output(InAPin2,GPIO.LOW)
+        GPIO.output(InBPin2,GPIO.LOW)
+    elif motor == 'both':
+        p1.stop()
+        GPIO.output(InAPin1,GPIO.LOW)
+        GPIO.output(InBPin1,GPIO.LOW)
+        p2.stop()
+        GPIO.output(InAPin2,GPIO.LOW)
+        GPIO.output(InBPin2,GPIO.LOW)
+
 
 if __name__ == "__main__":
 
+    zero_values = {'gyro_y':None,
+                   'acc_x':None,
+                   'acc_y':None,
+                   'acc_z':None
+                   }
+    
+    Q_angle = 0.001
+    Q_gyro = 0.003
+    R_angle = 0.03
+    angle = 180
+    bias = 0
+    P_00 = 0
+    P_01 = 0
+    P_10 = 0
+    P_11 = 0
+    
     #PID values
-    k_p = 900.0
-    k_i = 200.0
-    k_d = 300.0
+    k_p = 1800.0
+    k_i = 0.0
+    k_d = 0.0
     p_term = 0
     i_term = 0
     d_term = 0
     last_error = 0
 
     STD_LOOP_TIME = 0.01 # 10ms, 100Hz
-    target_angle = 90.0
+
+    steer_forward = False
+    steer_backward = False
+    steer_stop = True
+    steer_left = False
+    steer_rotate_left = False
+    steer_right = False
+    steer_rotate_right = False
+
+    stopped = False
+
+    turn_speed = 0.1
+    rotate_speed = 0.2
+
     target_offset = 0.0
 
+    wheel_position = 0
+    last_wheel_position = 0
+    wheel_velocity = 0
     target_position = 0
     zone_a = 4000
     zone_b = 2000
@@ -411,21 +492,12 @@ if __name__ == "__main__":
     velocity_scale_move = 40
     velocity_scale_stop = 30
 
-    steer_forward = False
-    steer_backward = False
-    steer_stop = False
-    steer_left = False
-    steer_rotate_left = False
-    steer_right = False
-    steer_rotate_right = False
-
-    stopped = False
-    wheel_position = 0
-    last_wheel_position = 0
+    #mine
     left_encoder_count = 0
     right_encoder_count = 0
-
+    target_angle = 90.0
     duty = 40
+    #end mine
 
     GPIO.setmode(GPIO.BOARD)
 
@@ -479,6 +551,17 @@ if __name__ == "__main__":
 
     balance(bus)
     #move('both','forward',50)
+
+    calibrate_sensors(bus)
+    print zero_values
+    timer = time.time()
+    while True:
+        acc_y_angle = get_acc_y(bus)
+        gyro_y_rate = get_gyro_y_rate(bus)
+        pitch = kalman(acc_y_angle,gyro_y_rate,(time.time() - timer) * 1000000)
+        print "%s, %s, %s" % (acc_y_angle, gyro_y_rate, pitch)
+        timer = time.time()
+        sleep(0.1)
 
     port = 8080
     application.listen(port)

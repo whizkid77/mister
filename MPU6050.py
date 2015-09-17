@@ -1,10 +1,12 @@
 #!/usr/bin/python
 
+#http://blog.bitify.co.uk/2013/11/reading-data-from-mpu-6050-on-raspberry.html
 #http://blog.bitify.co.uk/2013/11/using-complementary-filter-to-combine.html
 
 import smbus
 import math
 import time
+from time import sleep
 
 # Power management registers
 power_mgmt_1 = 0x6b
@@ -54,7 +56,7 @@ def loop(bus,duration=60.0,callback=None,debug=False):
     K1 = 1 - K
 
     time_diff = 0
-    loop_time = 0.01 # 100Hz
+    loop_time = 0.02 # 50Hz
 
     (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = read_all(bus)
 
@@ -68,7 +70,7 @@ def loop(bus,duration=60.0,callback=None,debug=False):
     gyro_total_y = (last_y) - gyro_offset_y
     
     if debug:
-        print "{0:.4f} {1:.2f} {2:.2f} {3:.2f} {4:.2f} {5:.2f} {6:.2f}".format( time.time() - now, (last_x), (gyro_total_x), (last_x), (last_y), (gyro_total_y), (last_y))
+        print "{0:.4f}\trotation_x: {1:.2f}\tgyro_total_x: {2:.2f}\tlast_x: {3:.2f}\trotation_y: {4:.2f}\tgyro_total_y: {5:.2f}\tlast_y: {6:.2f}".format( time.time() - now, (last_x), (gyro_total_x), (last_x), (last_y), (gyro_total_y), (last_y))
     if callback is not None:
         callback(loop_counter=0,rotation_x=last_x,rotation_y=last_y)
 
@@ -79,10 +81,16 @@ def loop(bus,duration=60.0,callback=None,debug=False):
         sleep_time = loop_time - time_diff
         if sleep_time > 0:
             time.sleep(sleep_time)
-            loop_start = time.time()
+        else:
+            print "WARNING, looping too slow: " + repr(sleep_time)
+
+        loop_start = time.time()
     
         (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = read_all(bus)
     
+        if debug:
+            print "gyro_scaled_x: {0:.4f}\tgyro_scaled_y: {1:.4f}\tgyro_scaled_z: {2:.4f}\taccel_scaled_x: {3:.4f}\taccel_scaled_y: {4:.4f}\taccel_scaled_z: {5:.4f}\t".format(gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z)
+
         gyro_scaled_x -= gyro_offset_x
         gyro_scaled_y -= gyro_offset_y
             
@@ -97,8 +105,10 @@ def loop(bus,duration=60.0,callback=None,debug=False):
 
         last_x = K * (last_x + gyro_x_delta) + (K1 * rotation_x)
         last_y = K * (last_y + gyro_y_delta) + (K1 * rotation_y)
+
         if debug:
-            print "{0:.4f} {1:.2f} {2:.2f} {3:.2f} {4:.2f} {5:.2f} {6:.2f}".format( time.time() - now, (rotation_x), (gyro_total_x), (last_x), (rotation_y), (gyro_total_y), (last_y))
+            print "{0:.4f}\trotation_x: {1:.2f}\tgyro_total_x: {2:.2f}\tlast_x: {3:.2f}\trotation_y: {4:.2f}\tgyro_total_y: {5:.2f}\tlast_y: {6:.2f}".format( time.time() - now, (rotation_x), (gyro_total_x), (last_x), (rotation_y), (gyro_total_y), (last_y))
+            pass
         if callback is not None:
             callback(loop_counter=i,rotation_x=last_x,rotation_y=last_y)
 
@@ -108,6 +118,8 @@ def pp(loop_counter,rotation_x,rotation_y):
 
 if __name__ == "__main__":
     bus = smbus.SMBus(0)  # or bus = smbus.SMBus(1) for Revision 2 boards
+
     # Now wake the 6050 up as it starts in sleep mode
     bus.write_byte_data(address, power_mgmt_1, 0)
+
     loop(bus,callback=None,debug=True,duration=120.0)
