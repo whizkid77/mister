@@ -6,6 +6,8 @@ import RPi.GPIO as GPIO
 import time
 from time import sleep
 
+import MPU6050
+
 import smbus
 import math
 
@@ -39,10 +41,6 @@ class ForwardHandler(tornado.web.RequestHandler):
         GPIO.output(InBPin2,GPIO.LOW)
         p2.start(duty)
 
-        for i in range(0,10):
-            print "%s,%s,%s,%s" % (GPIO.input(EncoderPinA1), GPIO.input(EncoderPinB1), GPIO.input(EncoderPinA2), GPIO.input(EncoderPinB2))
-            sleep(0.2)
-
         print "Off"
         GPIO.output(InAPin1,GPIO.LOW)
         GPIO.output(InBPin1,GPIO.LOW)
@@ -62,10 +60,6 @@ class BackwardHandler(tornado.web.RequestHandler):
         GPIO.output(InAPin2,GPIO.LOW)
         GPIO.output(InBPin2,GPIO.HIGH)
         p2.start(duty)
-
-        for i in range(0,10):
-            print "%s,%s,%s,%s" % (GPIO.input(EncoderPinA1), GPIO.input(EncoderPinB1), GPIO.input(EncoderPinA2), GPIO.input(EncoderPinB2))
-            sleep(0.2)
 
         print "Off"
         GPIO.output(InAPin1,GPIO.LOW)
@@ -92,10 +86,33 @@ def cleanup():
     GPIO.cleanup()
 
 
+# Motor encoders
+def encoder_init():
+    global EncoderPinA1,EncoderPinA2
+    GPIO.add_event_detect(EncoderPinA1,GPIO.RISING)
+    GPIO.add_event_callback(EncoderPinA1,encodeEventHandler)
+    #GPIO.add_event_detect(EncoderPinA2,GPIO.RISING)
+    #GPIO.add_event_callback(EncoderPinA2,encodeEventHandler)
 
+def encodeEventHandler(pin):
+    global left_encoder_count
+    global right_encoder_count
 
+    if pin == EncoderPinA1:
+        if GPIO.input(EncoderPinB1) == 1:
+            left_encoder_count = left_encoder_count + 1
+        else:
+            left_encoder_count = left_encoder_count - 1
+    elif pin == EncoderPinA2:
+        if GPIO.input(EncoderPinB2) == 1:
+            right_encoder_count = right_encoder_count + 1
+        else:
+            right_encoder_count = right_encoder_count - 1
 
+    #print "Encoder counts: %d, %d" % (left_encoder_count, right_encoder_count)
 
+# MPU-6050
+# http://blog.bitify.co.uk/2013/11/reading-data-from-mpu-6050-on-raspberry.html
 def read_byte(adr):
     return bus.read_byte_data(address, adr)
 
@@ -105,6 +122,7 @@ def read_word(adr):
     val = (high << 8) + low
     return val
 
+#convert two's complement
 def read_word_2c(adr):
     val = read_word(adr)
     if (val >= 0x8000):
@@ -123,6 +141,20 @@ def get_x_rotation(x,y,z):
     radians = math.atan2(y, dist(x,z))
     return math.degrees(radians)
 
+def get_pitch():
+    gyro_xout = read_word_2c(0x43)
+    gyro_yout = read_word_2c(0x45)
+    gyro_zout = read_word_2c(0x47)
+    
+    accel_xout = read_word_2c(0x3b)
+    accel_yout = read_word_2c(0x3d)
+    accel_zout = read_word_2c(0x3f)
+    
+    accel_xout_scaled = accel_xout / 16384.0
+    accel_yout_scaled = accel_yout / 16384.0
+    accel_zout_scaled = accel_zout / 16384.0
+
+    return get_y_rotation(accel_xout_scaled, accel_yout_scaled, accel_zout_scaled) + 90
 
 def imu_test():
 
@@ -157,42 +189,34 @@ def imu_test():
     print "y rotation: " , get_y_rotation(accel_xout_scaled, accel_yout_scaled, accel_zout_scaled)
 
 
-def balance():
+def balance(bus):
+    global loop_start_time
+    loop_start_time = time.time()
+    MPU6050.loop(bus,duration=999999.0,callback=adjust_wheels)
 
+
+def adjust_wheels(loop_counter,rotation_x,rotation_y):
     global last_wheel_position
     global stopped
     global pitch
+    global left_encoder_count,right_encoder_count
+    global wheel_velocity
 
-    loop_start_time = time.time()
-    timer = loop_start_time
-    loop_counter = 0
+    pitch = rotation_y + 90.0
+    print 'pitch %f,%f' % (pitch,rotation_y)
 
-    while True:
-        pitch = get_pitch()
-        timer = time.time()
-
-        print 'pitch %f' % pitch
-
-        if pitch < 60 or pitch > 120:
-            stop_and_reset()
-        else:
-            PID(target_angle,target_offset)
-
-        loop_counter = loop_counter + 1
+    if pitch < 60 or pitch > 120:
+        stop_and_reset()
+    else:
+        PID(target_angle,target_offset)
 
         if loop_counter % 10 == 0:
-            #wheel_position = left_encoder.read() + right_encoder.read()
+            wheel_position = left_encoder_count + right_encoder_count
             wheel_velocity = wheel_position - last_wheel_position
             last_wheel_position = wheel_position
             if abs(wheel_velocity) <= 20 and not stopped:
                 target_position = wheel_position
                 stopped = True
-
-        last_loop_useful_time = time.time() - loop_start_time
-        if last_loop_useful_time < STD_LOOP_TIME:
-            sleep(STD_LOOP_TIME - last_loop_useful_time)
-        last_loop_time = time.time() - loop_start_time
-        loop_start_time = time.time()
 
 def PID(rest_angle,offset):
     global steer_forward
@@ -200,6 +224,12 @@ def PID(rest_angle,offset):
     global steer_stop
     global p_term,i_term,d_term
     global last_error
+    global target_position
+    global zone_a,zone_b,position_scale_a,position_scale_b,position_scale_c
+    global velocity_scale_move,velocity_scale_stop
+    global wheel_velocity
+
+    steer_stop = False
 
     if steer_forward:
         offset = offset + wheel_velocity/velocity_scale_move
@@ -294,6 +324,7 @@ def move(motor,direction,speed):
             
 
 def stop_and_reset():
+    global target_position
     stop('both')
     last_error = 0
     i_term = 0
@@ -317,35 +348,68 @@ def stop(motor):
         GPIO.output(InBPin2,GPIO.LOW)
 
 
-def get_pitch():
-    gyro_xout = read_word_2c(0x43)
-    gyro_yout = read_word_2c(0x45)
-    gyro_zout = read_word_2c(0x47)
-    
-    accel_xout = read_word_2c(0x3b)
-    accel_yout = read_word_2c(0x3d)
-    accel_zout = read_word_2c(0x3f)
-    
-    accel_xout_scaled = accel_xout / 16384.0
-    accel_yout_scaled = accel_yout / 16384.0
-    accel_zout_scaled = accel_zout / 16384.0
 
-    return get_y_rotation(accel_xout_scaled, accel_yout_scaled, accel_zout_scaled) + 90
+def kalman(newAngle, newRate, dtime):
+    # KasBot V2  -  Kalman filter module
+    # http://www.arduino.cc/cgi-bin/yabb2/YaBB.pl?num=1284738418
+    # http://www.x-firm.com/?page_id=145
+    # with slightly modifications by Kristian Lauszus
+    # See http://academic.csuohio.edu/simond/courses/eec644/kalman.pdf and http://www.cs.unc.edu/~welch/media/pdf/kalman_intro.pdf for more information
+    dt = dtime / 1000000 # Convert from microseconds to seconds
+    
+    # Discrete Kalman filter time update equations - Time Update ("Predict")
+    # Update xhat - Project the state ahead
+    angle = angle + dt * (newRate - bias)
+    
+    # Update estimation error covariance - Project the error covariance ahead
+    P_00 = P_00 + (-dt * (P_10 + P_01) + Q_angle * dt)
+    P_01 = P_01 + (-dt * P_11)
+    P_10 = P_10 + (-dt * P_11)
+    P_11 = P_11 + (+Q_gyro * dt)
+    
+    # Discrete Kalman filter measurement update equations - Measurement Update ("Correct")
+    # Calculate Kalman gain - Compute the Kalman gain
+    S = P_00 + R_angle
+    K_0 = P_00 / S
+    K_1 = P_10 / S
+    
+    # Calculate angle and resting rate - Update estimate with measurement zk
+    y = newAngle - angle
+    angle = angle + (K_0 * y)
+    bias = bias + (K_1 * y)
+    
+    # Calculate estimation error covariance - Update the error covariance
+    P_00 = P_00 - (K_0 * P_00)
+    P_01 = P_01 - (K_0 * P_01)
+    P_10 = P_10 - (K_1 * P_00)
+    P_11 = P_11 - (K_1 * P_01)
+    
+    return angle
+
 
 if __name__ == "__main__":
 
-    #PID
-    k_p = 400.0
-    k_i = 0.0
-    k_d = 0.0
+    #PID values
+    k_p = 900.0
+    k_i = 200.0
+    k_d = 300.0
     p_term = 0
     i_term = 0
     d_term = 0
     last_error = 0
 
-    STD_LOOP_TIME = 0.01 # 10ms
+    STD_LOOP_TIME = 0.01 # 10ms, 100Hz
     target_angle = 90.0
     target_offset = 0.0
+
+    target_position = 0
+    zone_a = 4000
+    zone_b = 2000
+    position_scale_a = 250
+    position_scale_b = 500
+    position_scale_c = 1000
+    velocity_scale_move = 40
+    velocity_scale_stop = 30
 
     steer_forward = False
     steer_backward = False
@@ -358,6 +422,8 @@ if __name__ == "__main__":
     stopped = False
     wheel_position = 0
     last_wheel_position = 0
+    left_encoder_count = 0
+    right_encoder_count = 0
 
     duty = 40
 
@@ -409,7 +475,9 @@ if __name__ == "__main__":
     signal.signal(signal.SIGHUP,cleanup)
     atexit.register(cleanup)
 
-    balance()
+    encoder_init()
+
+    balance(bus)
     #move('both','forward',50)
 
     port = 8080
