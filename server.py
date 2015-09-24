@@ -1,15 +1,15 @@
+
+# usage:
+# sudo python server.py 1000 0 -100
+# sudo python server.py calibrate
+
+import os, sys, atexit, signal, time, smbus, math, json
 import tornado.ioloop
 import tornado.web
-import atexit
-import signal
 import RPi.GPIO as GPIO
-import time
 from time import sleep
 
 import MPU6050
-
-import smbus
-import math
 
 form = '''<!DOCTYPE html>
 <html><head><meta name="viewport" content="width=device-width;initial-scale=1.0;maximum-scale=1.0;">
@@ -107,9 +107,9 @@ def encodeEventHandler(pin):
             left_encoder_count = left_encoder_count - 1
     elif pin == EncoderPinA2:
         if GPIO.input(EncoderPinB2) == 1:
-            right_encoder_count = right_encoder_count + 1
-        else:
             right_encoder_count = right_encoder_count - 1
+        else:
+            right_encoder_count = right_encoder_count + 1
 
     #print "Encoder counts: %d, %d" % (left_encoder_count, right_encoder_count)
 
@@ -193,29 +193,27 @@ def imu_test():
 '''
 
 def balance(bus):
-    global loop_start_time
-    loop_start_time = time.time()
     MPU6050.loop(bus,duration=999999.0,callback=adjust_wheels)
 
 def adjust_wheels(loop_counter,rotation_x,rotation_y):
     global bus
-    global last_wheel_position
+    global wheel_position, last_wheel_position, wheel_velocity
     global stopped
     global pitch
     global left_encoder_count,right_encoder_count
-    global wheel_velocity
 
-    pitch = rotation_y + 90.0
+    pitch = rotation_y
 
-    print 'pitch %f,%f' % (pitch,rotation_y)
+    print 'pitch %f == %f' % (pitch, target_angle)
 
-    if pitch < 60 or pitch > 120:
+    if pitch < -20 or pitch > 20:
         stop_and_reset()
     else:
         PID(target_angle,target_offset)
 
         if loop_counter % 10 == 0:
             wheel_position = left_encoder_count + right_encoder_count
+            print "wheel position " + repr(wheel_position)
             wheel_velocity = wheel_position - last_wheel_position
             last_wheel_position = wheel_position
             if abs(wheel_velocity) <= 20 and not stopped:
@@ -229,10 +227,9 @@ def PID(rest_angle,offset):
     global steer_stop
     global p_term,i_term,d_term
     global last_error
-    global target_position
     global zone_a,zone_b,position_scale_a,position_scale_b,position_scale_c
     global velocity_scale_move,velocity_scale_stop
-    global wheel_velocity
+    global target_position, wheel_position, wheel_velocity
 
     if steer_forward:
         offset = offset + wheel_velocity/velocity_scale_move
@@ -241,20 +238,28 @@ def PID(rest_angle,offset):
         offset = offset - wheel_velocity/velocity_scale_move
         rest_angle = rest_angle + offset
     elif steer_stop:
-        position_error = wheel_position - target_position
+        
+        #try to stay in same place
+        position_error = (wheel_position - target_position)*2
+        print "position_error: " + repr(position_error)
+        print "old rest angle: " + repr(rest_angle)
         if abs(position_error) > zone_a:
             rest_angle = rest_angle - position_error/position_scale_a
         elif abs(position_error) > zone_b:
             rest_angle = rest_angle - position_error/position_scale_b
         else:
             rest_angle = rest_angle - position_error/position_scale_c
+        print "new rest angle: " + repr(rest_angle) + " : " + repr(wheel_velocity)
 
-        rest_angle = rest_angle - wheel_velocity/velocity_scale_stop
-        
-        if rest_angle < 80:
-            rest_angle = 80
-        elif rest_angle > 100:
-            rest_angle = 100
+        #rest_angle = rest_angle - wheel_velocity/velocity_scale_stop
+        print "final rest angle: " + repr(rest_angle)
+        #end try to stay in same place        
+
+        max_target_angle = 5
+        if rest_angle < -1 * max_target_angle:
+            rest_angle = -1 * max_target_angle
+        elif rest_angle > max_target_angle:
+            rest_angle = max_target_angle
 
     error = (rest_angle - pitch)/100
     p_term = k_p * error
@@ -279,7 +284,7 @@ def PID(rest_angle,offset):
         PIDLeft = PIDValue
         PIDRight = PIDValue
         
-    print "%s : %s (%s %s %s) Error: %s" % (PIDLeft, PIDRight, p_term, i_term, d_term, error)
+    print "%s (%s %s %s) e: %.3f" % (PIDValue, p_term, i_term, d_term, error)
 
     if PIDLeft >= 0:
         move('left', 'forward', PIDLeft)
@@ -292,7 +297,7 @@ def PID(rest_angle,offset):
 
 
 def stop_and_reset():
-    global target_position
+    global target_position, wheel_position
     stop('both')
     last_error = 0
     i_term = 0
@@ -345,7 +350,7 @@ def get_gyro_y_rate(bus):
     gyro_rate = -1 * (gyro_scaled_y - zero_values['gyro_y'])
     return gyro_rate
 
-# Y angle/pitch from accelerometer (90 degrees is up)
+# Y angle/pitch from accelerometer
 def get_acc_y(bus):
     (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = MPU6050.read_all(bus)
     
@@ -364,6 +369,13 @@ def get_acc_y(bus):
     return angle_y
 
 def calibrate_sensors(bus):
+    global calibration
+    calibration = {'pitch':0,'sample_count':0}
+    print "Calibrating..."
+    MPU6050.loop(bus,duration=3.0,callback=calibrate)
+    print "Done."
+    return calibration['pitch'] / calibration['sample_count']
+    '''
     global zero_values
     sample_count = 100
     gyro_y = 0
@@ -381,6 +393,12 @@ def calibrate_sensors(bus):
     zero_values['acc_x'] = acc_x / sample_count
     zero_values['acc_y'] = acc_y / sample_count
     zero_values['acc_z'] = acc_z / sample_count
+    '''
+
+def calibrate(loop_counter,rotation_x,rotation_y):
+    global calibration
+    calibration['pitch'] = calibration['pitch'] + rotation_y
+    calibration['sample_count'] = calibration['sample_count'] + 1
 
 def move(motor,direction,speed):
     if speed < 0:
@@ -455,9 +473,22 @@ if __name__ == "__main__":
     P_11 = 0
     
     #PID values
-    k_p = 1800.0
-    k_i = 0.0
-    k_d = 0.0
+    try:
+        if len(sys.argv) >= 2:
+            k_p = float(sys.argv[1])
+        else:
+            k_p = 0.0
+        if len(sys.argv) >= 3:
+            k_i = float(sys.argv[2])
+        else:
+            k_i = 0.0
+        if len(sys.argv) >= 4:
+            k_d = float(sys.argv[3])
+        else:
+            k_d = 0.0
+    except ValueError:
+        pass
+
     p_term = 0
     i_term = 0
     d_term = 0
@@ -486,16 +517,16 @@ if __name__ == "__main__":
     target_position = 0
     zone_a = 4000
     zone_b = 2000
-    position_scale_a = 250
-    position_scale_b = 500
-    position_scale_c = 1000
-    velocity_scale_move = 40
-    velocity_scale_stop = 30
+    position_scale_a = 250.0 * 2
+    position_scale_b = 500.0 * 2
+    position_scale_c = 1000.0 * 2
+    velocity_scale_move = 40.0
+    velocity_scale_stop = 30.0
 
     #mine
     left_encoder_count = 0
     right_encoder_count = 0
-    target_angle = 90.0
+    target_angle = 0
     duty = 40
     #end mine
 
@@ -549,21 +580,36 @@ if __name__ == "__main__":
 
     encoder_init()
 
-    balance(bus)
+    if os.path.exists('config'):
+        f = open('config', 'r+')
+        try:
+            config = json.loads(f.read())
+        except:
+            config = {}            
+        f.close()
+    else:
+        config = {}
+
+    if len(sys.argv) > 1 and sys.argv[1] == 'calibrate':
+        target_angle = calibrate_sensors(bus)
+        config['target_angle'] = target_angle
+        if os.path.exists('config'):
+            f = open('config', 'r+')
+        else:
+            f = open('config', 'w+')
+        print config
+        f.write(json.dumps(config))
+        f.close()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'web':
+        port = 8080
+        application.listen(port)
+        print "Listening on port %d" % port
+        tornado.ioloop.IOLoop.current().start()
+
+    else:    
+        target_angle = config['target_angle']
+        print 'target_angle: ' + repr(target_angle)
+        balance(bus)
+        
     #move('both','forward',50)
-
-    calibrate_sensors(bus)
-    print zero_values
-    timer = time.time()
-    while True:
-        acc_y_angle = get_acc_y(bus)
-        gyro_y_rate = get_gyro_y_rate(bus)
-        pitch = kalman(acc_y_angle,gyro_y_rate,(time.time() - timer) * 1000000)
-        print "%s, %s, %s" % (acc_y_angle, gyro_y_rate, pitch)
-        timer = time.time()
-        sleep(0.1)
-
-    port = 8080
-    application.listen(port)
-    print "Listening on port %d" % port
-    tornado.ioloop.IOLoop.current().start()
+    

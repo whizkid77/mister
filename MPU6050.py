@@ -56,7 +56,7 @@ def loop(bus,duration=60.0,callback=None,debug=False):
     K1 = 1 - K
 
     time_diff = 0
-    loop_time = 0.02 # 50Hz
+    loop_time = 0.025 # 40Hz
 
     (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = read_all(bus)
 
@@ -85,7 +85,7 @@ def loop(bus,duration=60.0,callback=None,debug=False):
             print "WARNING, looping too slow: " + repr(sleep_time)
 
         loop_start = time.time()
-    
+
         (gyro_scaled_x, gyro_scaled_y, gyro_scaled_z, accel_scaled_x, accel_scaled_y, accel_scaled_z) = read_all(bus)
     
         if debug:
