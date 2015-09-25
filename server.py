@@ -195,6 +195,27 @@ def imu_test():
 def balance(bus):
     MPU6050.loop(bus,duration=999999.0,callback=adjust_wheels)
 
+def orient(bus):
+    MPU6050.loop(bus,duration=999999.0,callback=dump_data)
+
+def dump_data(loop_counter,rotation_x,rotation_y):
+    global bus
+    global wheel_position, last_wheel_position, wheel_velocity
+    global target_position
+    global stopped
+    global left_encoder_count,right_encoder_count
+    if loop_counter % 10 == 0:
+        print 'pitch: %f' % (rotation_y)
+
+        wheel_position = left_encoder_count + right_encoder_count
+        print "wheel position: %d = %d + %d" % (wheel_position,left_encoder_count,right_encoder_count)
+
+        wheel_velocity = wheel_position - last_wheel_position
+        last_wheel_position = wheel_position
+        print "wheel_velocity: %d" % (wheel_velocity)
+
+        print "------------------------"
+
 def adjust_wheels(loop_counter,rotation_x,rotation_y):
     global bus
     global wheel_position, last_wheel_position, wheel_velocity
@@ -204,18 +225,17 @@ def adjust_wheels(loop_counter,rotation_x,rotation_y):
 
     pitch = rotation_y
 
-    print 'pitch %f == %f' % (pitch, target_angle)
-
     if pitch < -20 or pitch > 20:
         stop_and_reset()
     else:
         PID(target_angle,target_offset)
-
         if loop_counter % 10 == 0:
             wheel_position = left_encoder_count + right_encoder_count
             print "wheel position " + repr(wheel_position)
             wheel_velocity = wheel_position - last_wheel_position
             last_wheel_position = wheel_position
+
+            #force a stop if wheels are slow enough
             if abs(wheel_velocity) <= 20 and not stopped:
                 target_position = wheel_position
                 print "New target position: " + repr(wheel_position)
@@ -231,6 +251,8 @@ def PID(rest_angle,offset):
     global velocity_scale_move,velocity_scale_stop
     global target_position, wheel_position, wheel_velocity
 
+    print '------------------'
+
     if steer_forward:
         offset = offset + wheel_velocity/velocity_scale_move
         rest_angle = rest_angle - offset
@@ -240,28 +262,32 @@ def PID(rest_angle,offset):
     elif steer_stop:
         
         #try to stay in same place
-        position_error = (wheel_position - target_position)*2
-        print "position_error: " + repr(position_error)
-        print "old rest angle: " + repr(rest_angle)
+        position_error = (wheel_position - target_position)
+        print "position_error: %d = %d - %d" % (position_error, wheel_position, target_position)
+        print "wheel_velocity: %d" % (wheel_velocity)
+        print "original rest angle: %.6f" % (rest_angle)
         if abs(position_error) > zone_a:
             rest_angle = rest_angle - position_error/position_scale_a
         elif abs(position_error) > zone_b:
             rest_angle = rest_angle - position_error/position_scale_b
         else:
             rest_angle = rest_angle - position_error/position_scale_c
-        print "new rest angle: " + repr(rest_angle) + " : " + repr(wheel_velocity)
+        print "position-adjusted rest angle: %.6f" % (rest_angle)
 
-        #rest_angle = rest_angle - wheel_velocity/velocity_scale_stop
-        print "final rest angle: " + repr(rest_angle)
+        rest_angle = rest_angle - wheel_velocity/velocity_scale_stop
+        print "velocity-adjusted rest angle: %.6f" % (rest_angle)
         #end try to stay in same place        
 
-        max_target_angle = 5
+        #limit the rest angle
+        max_target_angle = 10
         if rest_angle < -1 * max_target_angle:
             rest_angle = -1 * max_target_angle
         elif rest_angle > max_target_angle:
             rest_angle = max_target_angle
 
     error = (rest_angle - pitch)/100
+    print 'pitch: %.5f == %.5f, error: %.5f' % (pitch, rest_angle, error)
+
     p_term = k_p * error
     i_term = i_term + k_i * error
     d_term = k_d * (error - last_error)
@@ -284,7 +310,7 @@ def PID(rest_angle,offset):
         PIDLeft = PIDValue
         PIDRight = PIDValue
         
-    print "%s (%s %s %s) e: %.3f" % (PIDValue, p_term, i_term, d_term, error)
+    print "PID: %.6f = %.6f + %.6f + %.6f (e: %.6f)" % (PIDValue, p_term, i_term, d_term, error)
 
     if PIDLeft >= 0:
         move('left', 'forward', PIDLeft)
@@ -397,6 +423,7 @@ def calibrate_sensors(bus):
 
 def calibrate(loop_counter,rotation_x,rotation_y):
     global calibration
+    print rotation_y
     calibration['pitch'] = calibration['pitch'] + rotation_y
     calibration['sample_count'] = calibration['sample_count'] + 1
 
@@ -517,11 +544,11 @@ if __name__ == "__main__":
     target_position = 0
     zone_a = 4000
     zone_b = 2000
-    position_scale_a = 250.0 * 2
-    position_scale_b = 500.0 * 2
-    position_scale_c = 1000.0 * 2
-    velocity_scale_move = 40.0
-    velocity_scale_stop = 30.0
+    position_scale_a = 100.0
+    position_scale_b = 200.0
+    position_scale_c = 400.0
+    velocity_scale_move = 200.0
+    velocity_scale_stop = 150.0
 
     #mine
     left_encoder_count = 0
@@ -594,7 +621,7 @@ if __name__ == "__main__":
         target_angle = calibrate_sensors(bus)
         config['target_angle'] = target_angle
         if os.path.exists('config'):
-            f = open('config', 'r+')
+            f = open('config', 'w')
         else:
             f = open('config', 'w+')
         print config
@@ -605,6 +632,8 @@ if __name__ == "__main__":
         application.listen(port)
         print "Listening on port %d" % port
         tornado.ioloop.IOLoop.current().start()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'orient':
+        orient(bus)
 
     else:    
         target_angle = config['target_angle']
